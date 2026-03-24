@@ -1,150 +1,147 @@
 # AGENTS.md
 
 ## Purpose
-- This file gives coding agents repository-specific instructions for safe, consistent changes.
+- Repository-level operating guide for coding agents working in this project.
 - Follow this file unless a direct user request conflicts with it.
-- Keep changes minimal, typed, and aligned with existing Create Figma Plugin patterns.
+- Keep edits minimal, typed, and consistent with existing local conventions.
 
 ## Project Snapshot
-- Stack: TypeScript + Create Figma Plugin.
-- Runtime: Figma Plugin API (`main` thread) + browser UI iframe (`ui` thread).
-- Node version target: v22 (from `README.md`).
-- Package scripts are in `package.json`; source code lives in `src/`.
-- Generated outputs: `build/` and `manifest.json` (both gitignored).
+- Monorepo-style layout with two TypeScript apps:
+- Plugin app: Create Figma Plugin (`apps/figma-plugin/src/main.ts`, `apps/figma-plugin/src/ui.ts`).
+- `apps/web/` backend: Next.js app hosting AI proxy endpoints.
+- Node target: `v22` (from root `README.md`).
+- Package manager and scripts: Bun with Turborepo workspaces.
 
 ## Repository Layout
-- `src/main.ts`: plugin entrypoint, selection handling, resize execution.
-- `src/ui.ts`: UI rendering, DOM events, and outgoing messages.
-- `src/messages.ts`: shared message contracts and preset constants.
-- `src/placement.ts`: algorithm to place newly created frames.
-- `src/placement-geometry.ts`: rectangle math helpers.
-- `build/*.js`: generated bundles; do not hand-edit.
+- `apps/figma-plugin/src/main.ts`: Figma main thread entrypoint and adaptation orchestration.
+- `apps/figma-plugin/src/ui.ts`: plugin iframe UI and typed message send/receive.
+- `apps/figma-plugin/src/messages.ts`: source of truth for main<->ui message contracts.
+- `apps/figma-plugin/src/adaptation-*.ts`: frame analysis, plan schema, and apply logic.
+- `apps/figma-plugin/src/placement.ts` + `apps/figma-plugin/src/placement-geometry.ts`: deterministic placement helpers.
+- `apps/web/app/api/resize/route.ts`: initial layout generation endpoint.
+- `apps/web/app/api/refine/route.ts`: refinement pass endpoint.
+- `apps/web/app/api/screenshots/upload/route.ts`: screenshot upload endpoint.
+- Generated artifacts: `apps/figma-plugin/build/`, `apps/figma-plugin/manifest.json`, and `apps/web/.next/` (do not hand-edit).
 
-## Source of Truth
-- Treat `src/messages.ts` as the canonical schema for main<->ui communication.
-- When changing message types, update sender and receiver paths in one change.
-- Keep discriminated unions exhaustive in `if`/`switch` handling.
+## Install and Run Commands
+- Root dependencies: `bun install`
+- Plugin build (typecheck + bundle + minify): `bun run build:plugin`
+- Plugin watch mode: `bun run watch`
+- Web dev server: `bun run dev:web`
+- Web production build: `bun run build:web`
+- Web start production server: `bun run --cwd apps/web start`
 
-## Install and Build Commands
-- Install dependencies: `bun install`
-- Build (typecheck + bundle + minify): `bun run build`
-- Watch mode (rebuild on changes): `bun run watch`
-- Show available scripts: `bun run`
+## Lint, Typecheck, and Test Commands
+- Root plugin has no dedicated `lint` script.
+- Root plugin has no dedicated `test` script.
+- Root type safety currently runs through `bun run build:plugin`.
+- Web lint command exists: `bun run lint:web`
+- Web currently has no `test` script.
+- Do not claim lint/test passed unless that exact command was run successfully.
 
-## Lint / Typecheck / Test Status
-- There is currently no dedicated `lint` script.
-- There is currently no `test` script.
-- No test files currently exist under `src/`.
-- `bun run build` is the current validation command and includes typechecking.
-- Do not claim lint/test passed unless those tools exist and were actually run.
-
-## Single Test Execution
-- Not available in current repo state (no test framework configured).
-- If asked to run one test, explain tests are not configured yet.
-- If you add a test runner, also add scripts in `package.json` and update this file.
-- Suggested future convention (Vitest example): `bun run test -- src/foo.test.ts -t "case name"`
+## Single Test Guidance (Important)
+- There is no configured test runner in root or `apps/web/` right now.
+- Single-test execution is therefore not available in current repo state.
+- If asked to run one test, state tests are not configured yet.
+- If you introduce tests, add scripts and document exact single-test command here.
+- Suggested future convention (Vitest): `bun run test -- path/to/file.test.ts -t "case name"`
 
 ## Important Command Caveats
-- Avoid raw `bunx tsc --noEmit`; it conflicts with plugin typings (`console`/`fetch` redeclare errors).
-- Prefer `bun run build` for reliable typecheck behavior in this repository.
-- Rebuild before handoff when touching message contracts or placement logic.
+- Avoid raw `bunx tsc --noEmit` in root (plugin typings can conflict on globals).
+- Prefer `bun run build:plugin` for reliable plugin typecheck behavior.
+- Rebuild plugin before handoff when touching message contracts or placement logic.
+- For backend-only changes, run at least `bun run lint:web`.
+
+## Source of Truth Rules
+- Treat `apps/figma-plugin/src/messages.ts` as canonical for plugin message payload schemas.
+- Update sender and receiver paths in a single change when message shapes change.
+- Keep discriminated unions exhaustive in message handlers.
+- Keep adaptation output schema aligned with `apps/figma-plugin/src/adaptation-plan-schema.ts`.
 
 ## Coding Style: Imports
-- Use ES module imports with single quotes and no trailing semicolons.
-- Keep external imports first, then a blank line, then local imports.
-- Use type-only imports for types (`import type { ... }` or inline `type Foo`).
-- Keep import groups concise and readable.
+- Use ES module imports.
+- Plugin files (`apps/figma-plugin/src/`): prefer single quotes and no semicolons.
+- Web files (`apps/web/`): preserve existing local style in each file (some use semicolons/double quotes).
+- Order imports: external first, blank line, then local imports.
+- Use type-only imports for types (`import type { ... }`).
 
 ## Coding Style: Formatting
 - Use 2-space indentation.
-- Prefer guard clauses and early returns over deep nesting.
-- Keep functions focused; extract helpers for non-trivial logic.
-- Prefer descriptive names over abbreviations.
-- Match existing punctuation style: no semicolons, consistent trailing commas.
+- Prefer guard clauses and early returns over nested branches.
+- Keep functions focused; extract helpers for non-trivial repeated logic.
+- Preserve existing punctuation style per touched file; avoid repo-wide reformat churn.
+- Keep user-facing text concise and action-oriented.
 
 ## Coding Style: Types
-- Keep code strict-mode compatible (project extends a strict TS config).
-- Type function parameters and return values explicitly.
-- Model state with unions/discriminated unions (see `InitSelectionStatePayload`).
-- Avoid `any`; use precise unions, intersections, and type guards.
-- Preserve literal unions for message names and mode values.
+- Keep strict TypeScript compatibility.
+- Type parameters and return types explicitly on exported/public functions.
+- Prefer precise unions and type guards over `any`.
+- Preserve literal unions for message `type`, stage, and preset values.
+- Validate unknown external input before narrowing and use.
 
 ## Naming Conventions
-- `PascalCase` for type aliases and type models.
+- `PascalCase` for types and interfaces.
 - `camelCase` for variables, functions, and parameters.
 - `UPPER_SNAKE_CASE` for module-level constants.
-- Use kebab-case filenames for multiword modules.
-- Keep message `type` strings stable and explicit (`'APPLY_RESIZE'`, `'SELECTION_STATE'`).
+- Kebab-case for multiword filenames in `apps/figma-plugin/src/`.
+- Keep message type strings explicit and stable (for example `'SELECTION_STATE'`).
 
-## Control Flow and Validation
-- Validate external inputs early (UI messages, selection state, parent checks).
-- Return quickly on invalid state instead of nesting large branches.
-- Re-check selection immediately before mutation operations.
-- Handle lookup misses (`undefined`) explicitly and notify users clearly.
+## Validation and Control Flow
+- Validate UI and API payloads at boundaries before mutation logic.
+- Re-check Figma selection state immediately before document changes.
+- Handle `undefined` lookup misses explicitly.
+- Prefer deterministic operations in placement/layout helpers.
+- Keep geometry helpers pure and side-effect free.
 
 ## Error Handling Guidelines
-- Wrap mutation-heavy Figma operations in `try/catch` when failure is possible.
-- Use `figma.notify(...)` for user-visible failures.
-- After failure, use safe fallback behavior (for example, refresh selection state).
+- Wrap mutation-heavy plugin operations in `try/catch` when failure is possible.
+- Use `figma.notify(...)` for actionable plugin failures.
+- In backend routes, return structured JSON errors with stable error codes.
+- Include request metadata (`requestId`, `durationMs`) in backend responses.
 - Use `_error` for intentionally unused caught errors.
 - Do not silently swallow errors that affect user flow.
 
-## Figma Plugin-Specific Practices
-- Keep `main` and `ui` responsibilities separated.
-- Main thread owns document mutation (`resize`, `createFrame`, selection updates).
-- UI thread owns DOM rendering and sends typed `pluginMessage` payloads.
-- After mutation, keep selection and viewport coherent (`scrollAndZoomIntoView`).
-- Avoid partial state updates when creation/modification fails.
+## Figma Plugin Boundaries
+- `apps/figma-plugin/src/main.ts` owns document reads/writes and viewport/selection updates.
+- `apps/figma-plugin/src/ui.ts` owns DOM rendering and posts typed `pluginMessage` payloads.
+- Do not move UI DOM logic into main thread code.
+- After mutation, keep viewport/selection coherent (`scrollAndZoomIntoView`).
+- Avoid partial state updates when adaptation/apply fails.
 
-## Placement Logic Expectations
-- Preserve collision-avoidance behavior in `src/placement.ts`.
-- Keep placement ordering deterministic.
-- Keep geometry helpers pure and side-effect free.
-- Prefer focused helper functions over repeated inline coordinate math.
+## Next.js Backend Notes
+- Follow `apps/web/AGENTS.md` for web-specific rules.
+- Current `apps/web/AGENTS.md` rule: Next.js version has breaking changes; check docs in `node_modules/next/dist/docs/` when needed.
+- Keep API handlers deterministic and schema-driven.
+- Preserve CORS behavior for plugin-to-local-backend calls.
 
-## UI and Messaging Expectations
-- Reflect selection validity immediately in UI state.
-- Keep status/error text concise and action-oriented.
-- Keep mode/preset values synchronized with shared types.
-- Do not accept untyped message payloads from `window.onmessage`.
+## Cursor and Copilot Rules Scan
+- No `.cursor/rules/` directory found at repository root.
+- No `.cursorrules` file found at repository root.
+- No `.github/copilot-instructions.md` file found at repository root.
+- If any are added later, mirror key instructions in this file.
 
-## Generated Files and Manual Edits
-- Do not manually edit `build/main.js` or `build/ui.js`.
-- Do not manually maintain generated `manifest.json` output.
-- Change source in `src/`, then run `bun run build`.
+## Generated Files and Artifacts
+- Do not manually edit `apps/figma-plugin/build/main.js` or `apps/figma-plugin/build/ui.js`.
+- Do not manually maintain generated `apps/figma-plugin/manifest.json`.
+- Do not manually edit `apps/web/.next/**` outputs.
+- Change source files, then rebuild the relevant package.
 
-## Cursor and Copilot Rules
-- No `.cursor/rules/` directory found.
-- No `.cursorrules` file found.
-- No `.github/copilot-instructions.md` file found.
-- This `AGENTS.md` is the active agent guidance file until those appear.
-
-## Change Checklist for Agents
-- Confirm requested behavior against existing message/type contracts.
-- Update `src/messages.ts` first when adding cross-thread payloads.
-- Keep changes localized to relevant files.
-- Run `bun run build` before final handoff.
-- If you add lint/tests, update this file with exact commands.
-
-## When Adding Tests Later
-- Add a `test` script in `package.json`.
-- Document exact full-suite and single-test commands in this file.
-- Start with deterministic unit tests for geometry and message/state logic.
-- Prefer tests that run without requiring the Figma desktop runtime.
-
-## When Adding Linting Later
-- Add a `lint` script in `package.json`.
-- Prefer autofix-capable rules plus CI-safe check mode.
-- Document both full lint and file-scoped lint commands.
-
-## Agent Handoff Notes
-- State what commands you ran and whether they succeeded.
-- If a command is unavailable, say so explicitly.
-- Reference changed files precisely in final responses.
-- Keep user-facing explanations concise and factual.
+## Agent Checklist Before Handoff
+- Keep changes localized and avoid unrelated refactors.
+- Verify message/type contract changes end-to-end.
+- Run relevant validation commands for touched areas.
+- Report which commands were run and whether they passed.
+- If a command is unavailable, state that explicitly.
 
 ## Anti-Patterns to Avoid
-- Do not place UI-only DOM logic into `src/main.ts`.
-- Do not mutate document nodes from unvalidated message payloads.
-- Do not bypass shared types with duplicated ad-hoc payload shapes.
-- Do not introduce unrelated formatting/tooling churn.
+- Untyped ad-hoc message payloads between plugin main/UI threads.
+- Document mutation based on unvalidated inputs.
+- Mixing plugin runtime concerns with Next.js backend concerns.
+- Large formatting-only diffs that hide functional changes.
+- Editing generated build artifacts instead of source files.
+
+## When Adding Tests or Lint Later
+- Add `test` scripts in root and/or `apps/web/package.json` as appropriate.
+- Document full-suite and single-test commands in this file immediately.
+- Prefer deterministic unit tests for geometry, schemas, and message/state logic.
+- For backend, add route-level tests around payload validation and error envelopes.

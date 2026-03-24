@@ -1,6 +1,8 @@
 .DS_Store
 *.log
 *.css.d.ts
-/build/
-/manifest.json
+apps/figma-plugin/build/
+apps/figma-plugin/manifest.json
+apps/web/.next/
+.turbo/
 node_modules/
