@@ -52,19 +52,45 @@ export type StartAdaptationPayload = {
   runId: string
   presetId: PresetId
   includeScreenshot: boolean
-  maxPasses: number
+}
+
+export type RequestRefinePayload = {
+  runId: string
+}
+
+export type ResetSessionPayload = {
+  runId: string
 }
 
 export type AdaptationStatePayload = {
   runId: string
   pass: number
-  maxPasses: number
   stage: AdaptationStage
   message: string
 }
 
+export type SessionReadyPayload = {
+  runId: string
+  createdFrameId: string
+  screenshot:
+    | {
+        mimeType: 'image/png'
+        base64: string
+      }
+    | null
+  metrics: AdaptationMetrics
+  warnings: Array<AdaptationWarning>
+  lockedSelection: SelectionInfo
+}
+
 export type AdaptationRehydratePayload = {
   activeRun: AdaptationStatePayload | null
+  session: {
+    runId: string
+    lockedSelection: SelectionInfo
+    refineCount: number
+    createdFrameId: string
+  } | null
 }
 
 export type AnalysisReadyPayload = {
@@ -75,7 +101,6 @@ export type AnalysisReadyPayload = {
 export type ApplyResultPayload = {
   runId: string
   pass: number
-  maxPasses: number
   createdFrameId: string
   screenshot:
     | {
@@ -85,7 +110,6 @@ export type ApplyResultPayload = {
     | null
   metrics: AdaptationMetrics
   warnings: Array<AdaptationWarning>
-  isFinalPass: boolean
 }
 
 export type AdaptationErrorPayload = {
@@ -95,6 +119,8 @@ export type AdaptationErrorPayload = {
 
 export type UiToMainMessage =
   | { type: 'START_ADAPTATION'; payload: StartAdaptationPayload }
+  | { type: 'REQUEST_REFINE'; payload: RequestRefinePayload }
+  | { type: 'RESET_SESSION'; payload: ResetSessionPayload }
   | { type: 'REQUEST_ADAPTATION_REHYDRATE' }
 
 export type MainToUiMessage =
@@ -109,6 +135,10 @@ export type MainToUiMessage =
   | {
       type: 'ANALYSIS_READY'
       payload: AnalysisReadyPayload
+    }
+  | {
+      type: 'SESSION_READY'
+      payload: SessionReadyPayload
     }
   | {
       type: 'APPLY_RESULT'
