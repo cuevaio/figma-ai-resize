@@ -2,13 +2,18 @@ import type {
   InitSelectionStatePayload,
   InvalidSelectionReason,
   MainToUiMessage,
-  PresetId
+  PresetId,
+  SelectionInfo
 } from './messages'
 
-type ActiveRunState = {
+type SessionPhase = 'generating' | 'ready' | 'refining'
+
+type SessionState = {
   runId: string
-  pass: number
-  maxPasses: number
+  phase: SessionPhase
+  lockedSelection: SelectionInfo | null
+  refineCount: number
+  createdFrameId: string | null
 }
 
 /* ------------------------------------------------------------------ */
@@ -64,6 +69,25 @@ function injectStyles(): void {
       cursor: default !important;
     }
     .fp-btn-primary:focus-visible {
+      outline: 2px solid #0d9488;
+      outline-offset: 1px;
+    }
+
+    .fp-btn-secondary {
+      transition: background 150ms ease, box-shadow 150ms ease,
+                  opacity 150ms ease, transform 80ms ease;
+    }
+    .fp-btn-secondary:hover:not(:disabled) {
+      background: #d4d4d4 !important;
+    }
+    .fp-btn-secondary:active:not(:disabled) {
+      background: #c0c0c0 !important;
+      transform: scale(0.98);
+    }
+    .fp-btn-secondary:disabled {
+      cursor: default !important;
+    }
+    .fp-btn-secondary:focus-visible {
       outline: 2px solid #0d9488;
       outline-offset: 1px;
     }
@@ -395,27 +419,79 @@ export default function (
   adaptButton.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)'
   adaptButton.style.userSelect = 'none'
 
+  const footerRow = document.createElement('div')
+  footerRow.style.display = 'none'
+  footerRow.style.gap = '8px'
+
+  const refineButton = document.createElement('button')
+  refineButton.type = 'button'
+  refineButton.textContent = 'Refine'
+  refineButton.className = 'fp-btn-primary'
+  refineButton.style.flex = '1'
+  refineButton.style.height = '36px'
+  refineButton.style.borderRadius = '8px'
+  refineButton.style.border = 'none'
+  refineButton.style.background = '#0d9488'
+  refineButton.style.color = '#ffffff'
+  refineButton.style.fontSize = '12px'
+  refineButton.style.fontWeight = '600'
+  refineButton.style.fontFamily = 'inherit'
+  refineButton.style.cursor = 'pointer'
+  refineButton.style.letterSpacing = '0.01em'
+  refineButton.style.boxShadow = '0 1px 2px rgba(0,0,0,0.05)'
+  refineButton.style.userSelect = 'none'
+
+  const resetButton = document.createElement('button')
+  resetButton.type = 'button'
+  resetButton.textContent = 'New Resize'
+  resetButton.className = 'fp-btn-secondary'
+  resetButton.style.flex = '1'
+  resetButton.style.height = '36px'
+  resetButton.style.borderRadius = '8px'
+  resetButton.style.border = 'none'
+  resetButton.style.background = 'var(--figma-color-bg-tertiary, #e5e5e5)'
+  resetButton.style.color = 'var(--figma-color-text, #333333)'
+  resetButton.style.fontSize = '12px'
+  resetButton.style.fontWeight = '600'
+  resetButton.style.fontFamily = 'inherit'
+  resetButton.style.cursor = 'pointer'
+  resetButton.style.letterSpacing = '0.01em'
+  resetButton.style.userSelect = 'none'
+
+  footerRow.appendChild(refineButton)
+  footerRow.appendChild(resetButton)
+
   footer.appendChild(adaptButton)
+  footer.appendChild(footerRow)
 
   /* ---- State management ---- */
   let selectionState = data
-  let activeRun: ActiveRunState | null = null
+  let session: SessionState | null = null
 
   updateSelectionState(selectionState, status)
-  updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
+  syncControls()
+
+  function syncControls(): void {
+    updateAiControls(
+      selectionState, session,
+      ratioSelect, adaptButton, refineButton, resetButton, footerRow
+    )
+  }
 
   adaptButton.addEventListener('click', () => {
-    if (!selectionState.valid || activeRun !== null) {
+    if (!selectionState.valid || session !== null) {
       return
     }
 
     const runId = createRunId()
-    activeRun = {
+    session = {
       runId,
-      pass: 0,
-      maxPasses: 4
+      phase: 'generating',
+      lockedSelection: null,
+      refineCount: 0,
+      createdFrameId: null
     }
-    updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
+    syncControls()
     showProgress(progressTrack, progressFill)
     updateAiCardState(aiCard, 'running')
     setStatusAnimated(
@@ -432,9 +508,63 @@ export default function (
           payload: {
             runId,
             presetId: ratioSelect.value as PresetId,
-            includeScreenshot: true,
-            maxPasses: 4
+            includeScreenshot: true
           }
+        }
+      },
+      '*'
+    )
+  })
+
+  refineButton.addEventListener('click', () => {
+    if (session === null || session.phase !== 'ready') return
+
+    session.phase = 'refining'
+    syncControls()
+    showProgress(progressTrack, progressFill)
+    updateAiCardState(aiCard, 'running')
+    setStatusAnimated(
+      adaptationStatus,
+      'Starting refinement...',
+      'var(--figma-color-text, #333333)',
+      pulseDots
+    )
+
+    parent.postMessage(
+      {
+        pluginMessage: {
+          type: 'REQUEST_REFINE',
+          payload: { runId: session.runId }
+        }
+      },
+      '*'
+    )
+  })
+
+  resetButton.addEventListener('click', () => {
+    if (session === null) return
+    if (session.phase === 'generating' || session.phase === 'refining') return
+
+    const runId = session.runId
+    session = null
+
+    hideProgress(progressTrack, progressFill)
+    updateAiCardState(aiCard, 'idle')
+    pulseDots.style.display = 'inline-flex'
+    setStatusAnimated(
+      adaptationStatus,
+      'Ready to resize with AI.',
+      'var(--figma-color-text, #333333)'
+    )
+    selectionLabel.textContent = 'Selection'
+    updateSelectionState(selectionState, status)
+    syncControls()
+
+    parent.postMessage(
+      {
+        pluginMessage: {
+          type: 'RESET_SESSION',
+          payload: { runId }
         }
       },
       '*'
@@ -448,18 +578,43 @@ export default function (
     }
 
     if (pluginMessage.type === 'SELECTION_STATE') {
+      if (session !== null) return
       selectionState = pluginMessage.payload
       updateSelectionState(selectionState, status)
-      updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
+      syncControls()
       return
     }
 
     if (pluginMessage.type === 'ADAPTATION_REHYDRATE') {
-      if (pluginMessage.payload.activeRun !== null) {
-        activeRun = {
+      const rehydrateSession = pluginMessage.payload.session
+      if (rehydrateSession !== null && pluginMessage.payload.activeRun === null) {
+        session = {
+          runId: rehydrateSession.runId,
+          phase: 'ready',
+          lockedSelection: rehydrateSession.lockedSelection,
+          refineCount: rehydrateSession.refineCount,
+          createdFrameId: rehydrateSession.createdFrameId
+        }
+        selectionLabel.textContent = 'Source (locked)'
+        updateSelectionCardForSession(rehydrateSession.lockedSelection, status)
+        updateAiCardState(aiCard, 'success')
+        setStatusAnimated(
+          adaptationStatus,
+          'Session active. Refine or start new resize.',
+          '#059669'
+        )
+      } else if (pluginMessage.payload.activeRun !== null) {
+        const phase: SessionPhase = rehydrateSession !== null ? 'refining' : 'generating'
+        session = {
           runId: pluginMessage.payload.activeRun.runId,
-          pass: pluginMessage.payload.activeRun.pass,
-          maxPasses: pluginMessage.payload.activeRun.maxPasses
+          phase,
+          lockedSelection: rehydrateSession?.lockedSelection ?? null,
+          refineCount: rehydrateSession?.refineCount ?? 0,
+          createdFrameId: rehydrateSession?.createdFrameId ?? null
+        }
+        if (rehydrateSession !== null) {
+          selectionLabel.textContent = 'Source (locked)'
+          updateSelectionCardForSession(rehydrateSession.lockedSelection, status)
         }
         const isError = pluginMessage.payload.activeRun.stage === 'FAILED'
         setStatusAnimated(
@@ -476,113 +631,118 @@ export default function (
         }
       }
 
-      updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
+      syncControls()
+      return
+    }
+
+    if (pluginMessage.type === 'SESSION_READY') {
+      if (session === null || pluginMessage.payload.runId !== session.runId) return
+
+      session.phase = 'ready'
+      session.lockedSelection = pluginMessage.payload.lockedSelection
+      session.createdFrameId = pluginMessage.payload.createdFrameId
+      session.refineCount = 0
+
+      hideProgress(progressTrack, progressFill)
+      pulseDots.style.display = 'none'
+      updateAiCardState(
+        aiCard,
+        pluginMessage.payload.warnings.length > 0 ? 'warning' : 'success'
+      )
+
+      const hasWarnings = pluginMessage.payload.warnings.length > 0
+      const statusText = hasWarnings
+        ? `Layout applied with ${pluginMessage.payload.warnings.length} warning(s). Refine or start new.`
+        : 'Layout applied. Refine to improve or start new resize.'
+      const statusColor = hasWarnings ? '#d97706' : '#059669'
+      setStatusAnimated(adaptationStatus, statusText, statusColor)
+
+      selectionLabel.textContent = 'Source (locked)'
+      updateSelectionCardForSession(pluginMessage.payload.lockedSelection, status)
+
+      syncControls()
       return
     }
 
     if (pluginMessage.type === 'ADAPTATION_STATE') {
-      if (activeRun === null) {
-        activeRun = {
-          runId: pluginMessage.payload.runId,
-          pass: pluginMessage.payload.pass,
-          maxPasses: pluginMessage.payload.maxPasses
-        }
-      }
-
-      if (pluginMessage.payload.runId !== activeRun.runId) {
-        return
-      }
-
-      activeRun.pass = pluginMessage.payload.pass
-      activeRun.maxPasses = pluginMessage.payload.maxPasses
+      if (session === null) return
+      if (pluginMessage.payload.runId !== session.runId) return
 
       const isFailed = pluginMessage.payload.stage === 'FAILED'
       const isCompleted = pluginMessage.payload.stage === 'COMPLETED'
-      const isIdle = pluginMessage.payload.stage === 'IDLE'
+
+      if (isFailed) {
+        hideProgress(progressTrack, progressFill)
+        updateAiCardState(aiCard, 'error')
+        pulseDots.style.display = 'none'
+        setStatusAnimated(adaptationStatus, pluginMessage.payload.message, '#dc2626')
+
+        if (session.phase === 'refining') {
+          session.phase = 'ready'
+        } else {
+          session = null
+          selectionLabel.textContent = 'Selection'
+          updateSelectionState(selectionState, status)
+        }
+        syncControls()
+        return
+      }
 
       if (isCompleted) {
-        hideProgress(progressTrack, progressFill)
-        updateAiCardState(aiCard, 'success')
-        pulseDots.style.display = 'none'
         setStatusAnimated(adaptationStatus, pluginMessage.payload.message, '#059669')
-        activeRun = null
-      } else if (isFailed || isIdle) {
-        hideProgress(progressTrack, progressFill)
-        updateAiCardState(aiCard, isFailed ? 'error' : 'idle')
-        pulseDots.style.display = 'none'
-        setStatusAnimated(
-          adaptationStatus,
-          pluginMessage.payload.message,
-          isFailed ? '#dc2626' : 'var(--figma-color-text, #333333)'
-        )
-        activeRun = null
-      } else {
-        showProgress(progressTrack, progressFill)
-        updateAiCardState(aiCard, 'running')
-        pulseDots.style.display = 'inline-flex'
-        setStatusAnimated(
-          adaptationStatus,
-          pluginMessage.payload.message,
-          'var(--figma-color-text, #333333)',
-          pulseDots
-        )
-      }
-
-      updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
-      return
-    }
-
-    if (pluginMessage.type === 'APPLY_RESULT') {
-      if (activeRun === null) {
-        activeRun = {
-          runId: pluginMessage.payload.runId,
-          pass: pluginMessage.payload.pass,
-          maxPasses: pluginMessage.payload.maxPasses
-        }
-      }
-
-      if (pluginMessage.payload.runId !== activeRun.runId) {
         return
       }
 
-      if (pluginMessage.payload.isFinalPass) {
-        hideProgress(progressTrack, progressFill)
-        pulseDots.style.display = 'none'
-
-        if (pluginMessage.payload.warnings.length > 0) {
-          updateAiCardState(aiCard, 'warning')
-          setStatusAnimated(
-            adaptationStatus,
-            `Layout applied with ${pluginMessage.payload.warnings.length} warning(s).`,
-            '#d97706'
-          )
-        } else {
-          updateAiCardState(aiCard, 'success')
-          setStatusAnimated(adaptationStatus, 'Layout applied successfully.', '#059669')
-        }
-        activeRun = null
-        updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
-        return
-      }
-
+      showProgress(progressTrack, progressFill)
+      updateAiCardState(aiCard, 'running')
+      pulseDots.style.display = 'inline-flex'
       setStatusAnimated(
         adaptationStatus,
-        `Pass ${pluginMessage.payload.pass}/${pluginMessage.payload.maxPasses} done. Finalizing...`,
+        pluginMessage.payload.message,
         'var(--figma-color-text, #333333)',
         pulseDots
       )
       return
     }
 
+    if (pluginMessage.type === 'APPLY_RESULT') {
+      if (session === null || pluginMessage.payload.runId !== session.runId) return
+
+      session.phase = 'ready'
+      session.refineCount = pluginMessage.payload.pass - 1
+
+      hideProgress(progressTrack, progressFill)
+      pulseDots.style.display = 'none'
+
+      const hasWarnings = pluginMessage.payload.warnings.length > 0
+      updateAiCardState(aiCard, hasWarnings ? 'warning' : 'success')
+
+      const statusText = hasWarnings
+        ? `Refinement applied with ${pluginMessage.payload.warnings.length} warning(s).`
+        : 'Refinement applied. Refine again or start new resize.'
+      const statusColor = hasWarnings ? '#d97706' : '#059669'
+      setStatusAnimated(adaptationStatus, statusText, statusColor)
+
+      syncControls()
+      return
+    }
+
     if (pluginMessage.type === 'ADAPTATION_ERROR') {
-      if (activeRun === null || pluginMessage.payload.runId === activeRun.runId) {
-        hideProgress(progressTrack, progressFill)
-        updateAiCardState(aiCard, 'error')
-        pulseDots.style.display = 'none'
-        setStatusAnimated(adaptationStatus, pluginMessage.payload.message, '#dc2626')
-        activeRun = null
-        updateAiControls(selectionState, activeRun, ratioSelect, adaptButton)
+      if (session === null || pluginMessage.payload.runId !== session.runId) return
+
+      hideProgress(progressTrack, progressFill)
+      updateAiCardState(aiCard, 'error')
+      pulseDots.style.display = 'none'
+      setStatusAnimated(adaptationStatus, pluginMessage.payload.message, '#dc2626')
+
+      if (session.phase === 'refining') {
+        session.phase = 'ready'
+      } else {
+        session = null
+        selectionLabel.textContent = 'Selection'
+        updateSelectionState(selectionState, status)
       }
+      syncControls()
     }
   }
 
@@ -626,21 +786,66 @@ function updateSelectionState(
   statusNode.style.color = '#dc2626'
 }
 
-function updateAiControls(
-  state: InitSelectionStatePayload,
-  run: ActiveRunState | null,
-  ratioSelect: HTMLSelectElement,
-  adaptButton: HTMLButtonElement
+function updateSelectionCardForSession(
+  lockedSelection: SelectionInfo,
+  statusNode: HTMLParagraphElement
 ): void {
-  const isBusy = run !== null
-  const canRun = state.valid && !isBusy
+  statusNode.textContent = `${lockedSelection.name} (${Math.round(lockedSelection.width)}\u00D7${Math.round(lockedSelection.height)})`
+  statusNode.style.color = 'var(--figma-color-text, #333333)'
+}
 
-  ratioSelect.disabled = isBusy
-  adaptButton.disabled = canRun === false
-  adaptButton.style.opacity = canRun ? '1' : '0.5'
-  adaptButton.textContent = isBusy
-    ? `Running pass ${run.pass}/${run.maxPasses}`
-    : 'Resize with AI'
+function updateAiControls(
+  selState: InitSelectionStatePayload,
+  currentSession: SessionState | null,
+  ratioSelect: HTMLSelectElement,
+  adaptButton: HTMLButtonElement,
+  refineBtn: HTMLButtonElement,
+  resetBtn: HTMLButtonElement,
+  footerRowEl: HTMLDivElement
+): void {
+  if (currentSession === null) {
+    adaptButton.style.display = 'block'
+    footerRowEl.style.display = 'none'
+    ratioSelect.disabled = false
+    adaptButton.disabled = !selState.valid
+    adaptButton.style.opacity = selState.valid ? '1' : '0.5'
+    adaptButton.textContent = 'Resize with AI'
+    return
+  }
+
+  if (currentSession.phase === 'generating') {
+    adaptButton.style.display = 'block'
+    footerRowEl.style.display = 'none'
+    ratioSelect.disabled = true
+    adaptButton.disabled = true
+    adaptButton.style.opacity = '0.5'
+    adaptButton.textContent = 'Generating layout...'
+    return
+  }
+
+  if (currentSession.phase === 'refining') {
+    adaptButton.style.display = 'none'
+    footerRowEl.style.display = 'flex'
+    ratioSelect.disabled = true
+    refineBtn.disabled = true
+    refineBtn.style.opacity = '0.5'
+    refineBtn.textContent = 'Refining...'
+    resetBtn.disabled = true
+    resetBtn.style.opacity = '0.5'
+    return
+  }
+
+  // phase === 'ready'
+  adaptButton.style.display = 'none'
+  footerRowEl.style.display = 'flex'
+  ratioSelect.disabled = true
+  refineBtn.disabled = false
+  refineBtn.style.opacity = '1'
+  refineBtn.textContent = currentSession.refineCount > 0
+    ? `Refine again (${currentSession.refineCount} done)`
+    : 'Refine'
+  resetBtn.disabled = false
+  resetBtn.style.opacity = '1'
 }
 
 function getInvalidSelectionMessage(reason: InvalidSelectionReason): string {

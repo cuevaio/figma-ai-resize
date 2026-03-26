@@ -11,26 +11,30 @@ import {
   type InvalidSelectionReason,
   type MainToUiMessage,
   type PresetId,
+  type RequestRefinePayload,
+  type ResetSessionPayload,
   type StartAdaptationPayload,
   type UiToMainMessage
 } from './messages'
 
-import type { AdaptationWarning, FrameAnalysisPayload } from './adaptation-types'
+import type { FrameAnalysisPayload } from './adaptation-types'
 
 const UI_OPTIONS = {
   width: 360,
   height: 540
 }
 
-const REFINE_PASS_COUNT = 3
-const ADAPTATION_PASS_COUNT = 1 + REFINE_PASS_COUNT
-
 type AdaptationSession = {
   sourceFrameId: string
   sourceName: string
+  sourceWidth: number
+  sourceHeight: number
   analysis: FrameAnalysisPayload
   presetId: PresetId
   lastState: AdaptationStatePayload | null
+  outputFrameId: string | null
+  refineCount: number
+  busy: boolean
 }
 
 const adaptationSessions = new Map<string, AdaptationSession>()
@@ -47,6 +51,16 @@ function getActiveAdaptationState(): AdaptationStatePayload | null {
     }
   })
   return latestState
+}
+
+function getActiveSessionEntry(): { runId: string; session: AdaptationSession } | null {
+  let result: { runId: string; session: AdaptationSession } | null = null
+  adaptationSessions.forEach((session, runId) => {
+    if (session.outputFrameId !== null) {
+      result = { runId, session }
+    }
+  })
+  return result
 }
 
 export default function () {
@@ -67,11 +81,33 @@ export default function () {
       return
     }
 
+    if (message.type === 'REQUEST_REFINE') {
+      void handleRequestRefine(message.payload)
+      return
+    }
+
+    if (message.type === 'RESET_SESSION') {
+      handleResetSession(message.payload)
+      return
+    }
+
     if (message.type === 'REQUEST_ADAPTATION_REHYDRATE') {
+      const activeEntry = getActiveSessionEntry()
       const rehydrateMessage: MainToUiMessage = {
         type: 'ADAPTATION_REHYDRATE',
         payload: {
-          activeRun: getActiveAdaptationState()
+          activeRun: getActiveAdaptationState(),
+          session: activeEntry !== null ? {
+            runId: activeEntry.runId,
+            lockedSelection: {
+              nodeId: activeEntry.session.sourceFrameId,
+              name: activeEntry.session.sourceName,
+              width: activeEntry.session.sourceWidth,
+              height: activeEntry.session.sourceHeight
+            },
+            refineCount: activeEntry.session.refineCount,
+            createdFrameId: activeEntry.session.outputFrameId!
+          } : null
         }
       }
       figma.ui.postMessage(rehydrateMessage)
@@ -106,6 +142,8 @@ function getSelectionState(): InitSelectionStatePayload {
 }
 
 function postSelectionState(): void {
+  if (hasActiveAdaptationSession()) return
+
   const message: MainToUiMessage = {
     type: 'SELECTION_STATE',
     payload: getSelectionState()
@@ -137,17 +175,17 @@ function getSelectedFrame():
 async function handleStartAdaptation(payload: StartAdaptationPayload): Promise<void> {
   const { runId, presetId, includeScreenshot } = payload
 
-  postAdaptationState(runId, 0, ADAPTATION_PASS_COUNT, 'ANALYZING', 'Analyzing selected frame...')
+  postAdaptationState(runId, 0, 'ANALYZING', 'Analyzing selected frame...')
 
   const preset = ASPECT_RATIO_PRESETS.find((item) => item.id === presetId)
   if (typeof preset === 'undefined') {
-    postAdaptationError(runId, 0, ADAPTATION_PASS_COUNT, 'Invalid preset selected.')
+    postAdaptationError(runId, 0, 'Invalid preset selected.')
     return
   }
 
   const selectedFrame = getSelectedFrame()
   if ('reason' in selectedFrame) {
-    postAdaptationError(runId, 0, ADAPTATION_PASS_COUNT, 'Select a single frame to run adaptation.')
+    postAdaptationError(runId, 0, 'Select a single frame to run adaptation.')
     postSelectionState()
     return
   }
@@ -171,7 +209,6 @@ async function handleStartAdaptation(payload: StartAdaptationPayload): Promise<v
     postAdaptationError(
       runId,
       0,
-      ADAPTATION_PASS_COUNT,
       `Could not analyze frame for adaptation. ${toMessage(error)}`
     )
     return
@@ -181,7 +218,6 @@ async function handleStartAdaptation(payload: StartAdaptationPayload): Promise<v
     postAdaptationError(
       runId,
       0,
-      ADAPTATION_PASS_COUNT,
       'Source screenshot is missing. Screenshot upload requires image export.'
     )
     return
@@ -190,9 +226,14 @@ async function handleStartAdaptation(payload: StartAdaptationPayload): Promise<v
   const session: AdaptationSession = {
     sourceFrameId: sourceFrame.id,
     sourceName: sourceFrame.name,
+    sourceWidth: sourceFrame.width,
+    sourceHeight: sourceFrame.height,
     analysis,
     presetId,
-    lastState: null
+    lastState: null,
+    outputFrameId: null,
+    refineCount: 0,
+    busy: true
   }
   adaptationSessions.set(runId, session)
 
@@ -205,10 +246,10 @@ async function handleStartAdaptation(payload: StartAdaptationPayload): Promise<v
   }
   figma.ui.postMessage(analysisMessage)
 
-  await runSingleAdaptationPass(runId)
+  await runInitialLayout(runId)
 }
 
-async function runSingleAdaptationPass(runId: string): Promise<void> {
+async function runInitialLayout(runId: string): Promise<void> {
   const session = adaptationSessions.get(runId)
   if (typeof session === 'undefined') {
     return
@@ -220,13 +261,12 @@ async function runSingleAdaptationPass(runId: string): Promise<void> {
     postAdaptationError(
       runId,
       0,
-      ADAPTATION_PASS_COUNT,
       `Original frame "${session.sourceName}" is no longer available.`
     )
     return
   }
 
-  postAdaptationState(runId, 1, ADAPTATION_PASS_COUNT, 'PLANNING', 'Generating layout...')
+  postAdaptationState(runId, 1, 'PLANNING', 'Generating layout...')
 
   let plan: Awaited<ReturnType<typeof requestDirectLayoutPlan>>
   try {
@@ -239,13 +279,12 @@ async function runSingleAdaptationPass(runId: string): Promise<void> {
     postAdaptationError(
       runId,
       1,
-      ADAPTATION_PASS_COUNT,
       `Failed to generate AI layout for frame "${session.sourceName}". ${toMessage(error)}`
     )
     return
   }
 
-  postAdaptationState(runId, 1, ADAPTATION_PASS_COUNT, 'APPLYING', 'Applying generated layout...')
+  postAdaptationState(runId, 1, 'APPLYING', 'Applying generated layout...')
 
   let applyResult: Awaited<ReturnType<typeof applyAdaptationPlan>>
   try {
@@ -262,121 +301,154 @@ async function runSingleAdaptationPass(runId: string): Promise<void> {
     postAdaptationError(
       runId,
       1,
-      ADAPTATION_PASS_COUNT,
       `Could not apply adaptation to frame "${session.sourceName}". ${toMessage(error)}`
     )
     return
   }
 
-  let completedPass = 1
-  const finalFrame = applyResult.frame
-  const finalWarnings = [...applyResult.warnings]
+  const outputFrame = applyResult.frame
+  session.outputFrameId = outputFrame.id
+  session.refineCount = 0
+  session.busy = false
+  adaptationSessions.set(runId, session)
 
-  for (let refineIndex = 1; refineIndex <= REFINE_PASS_COUNT; refineIndex += 1) {
-    const pass = 1 + refineIndex
-    try {
-      postAdaptationState(
-        runId,
-        pass,
-        ADAPTATION_PASS_COUNT,
-        'PLANNING',
-        `Refining generated layout (pass ${pass}/${ADAPTATION_PASS_COUNT})...`
-      )
+  figma.currentPage.selection = [outputFrame]
+  figma.viewport.scrollAndZoomIntoView([outputFrame])
 
-      const refineAnalysis = await analyzeFrameForAdaptation({
-        runId,
-        sourceFrame: finalFrame,
-        targetWidth: Math.max(1, Math.round(finalFrame.width)),
-        targetHeight: Math.max(1, Math.round(finalFrame.height)),
-        presetId: session.presetId,
-        includeScreenshot: true
-      })
+  const screenshot = await exportFrameScreenshot(outputFrame)
 
-      if (refineAnalysis.screenshot === null) {
-        throw new Error('Refine screenshot export failed.')
-      }
-
-      const refinedPlan = await requestRefinedLayoutPlan({
-        analysis: refineAnalysis,
-        referenceScreenshot: session.analysis.screenshot,
-        referenceFrameId: session.sourceFrameId
-      })
-
-      postAdaptationState(
-        runId,
-        pass,
-        ADAPTATION_PASS_COUNT,
-        'APPLYING',
-        `Applying refined layout (pass ${pass}/${ADAPTATION_PASS_COUNT})...`
-      )
-
-      const refinedApplyResult = await applyAdaptationPlanToFrame({
-        targetFrame: finalFrame,
-        analysis: refineAnalysis,
-        plan: refinedPlan
-      })
-
-      completedPass = pass
-      finalWarnings.push(...refinedApplyResult.warnings)
-    } catch (error) {
-      console.error('[adaptation:refine]', error)
-      figma.notify(`Refine pass ${pass}/${ADAPTATION_PASS_COUNT} failed. Kept previous result.`)
-      break
-    }
-  }
-
-  const screenshot = await exportFrameScreenshot(finalFrame)
-
-  const passMessage: MainToUiMessage = {
-    type: 'APPLY_RESULT',
+  const readyMessage: MainToUiMessage = {
+    type: 'SESSION_READY',
     payload: {
       runId,
-      pass: completedPass,
-      maxPasses: ADAPTATION_PASS_COUNT,
-      createdFrameId: finalFrame.id,
+      createdFrameId: outputFrame.id,
       screenshot,
       metrics: applyResult.metrics,
-      warnings: finalWarnings,
-      isFinalPass: true
+      warnings: applyResult.warnings,
+      lockedSelection: {
+        nodeId: session.sourceFrameId,
+        name: session.sourceName,
+        width: session.sourceWidth,
+        height: session.sourceHeight
+      }
     }
   }
-  figma.ui.postMessage(passMessage)
+  figma.ui.postMessage(readyMessage)
 
-  finalizeSession(runId, finalFrame.id, finalWarnings, completedPass, ADAPTATION_PASS_COUNT)
+  if (applyResult.warnings.length > 0) {
+    figma.notify(`Initial layout applied with ${applyResult.warnings.length} warning(s).`)
+  } else {
+    figma.notify('Initial layout applied. Use Refine to improve.')
+  }
+
+  postAdaptationState(runId, 1, 'COMPLETED', 'Initial layout applied. Click Refine to improve.')
 }
 
-function finalizeSession(
-  runId: string,
-  selectedFrameId: string,
-  warnings: Array<AdaptationWarning>,
-  pass: number,
-  maxPasses: number
-): void {
+async function handleRequestRefine(payload: RequestRefinePayload): Promise<void> {
+  const { runId } = payload
   const session = adaptationSessions.get(runId)
   if (typeof session === 'undefined') {
+    postAdaptationError(runId, 0, 'No active session for this run.')
     return
   }
 
-  const selectedNode = figma.getNodeById(selectedFrameId)
-  if (selectedNode === null || selectedNode.type !== 'FRAME') {
+  if (session.busy) {
+    figma.notify('A refinement is already in progress.')
+    return
+  }
+
+  if (session.outputFrameId === null) {
+    postAdaptationError(runId, 0, 'No output frame available to refine.')
+    return
+  }
+
+  const outputNode = figma.getNodeById(session.outputFrameId)
+  if (outputNode === null || outputNode.type !== 'FRAME') {
     adaptationSessions.delete(runId)
-    postAdaptationError(runId, pass, maxPasses, 'Final adapted frame not found.')
+    postAdaptationError(runId, session.refineCount + 1, 'Output frame is no longer available.')
     return
   }
 
-  if (warnings.length > 0) {
-    figma.notify(`Adaptation completed with ${warnings.length} warning(s).`)
-  } else {
-    figma.notify('Adaptation completed.')
+  session.busy = true
+  const pass = session.refineCount + 2
+  adaptationSessions.set(runId, session)
+
+  try {
+    postAdaptationState(runId, pass, 'PLANNING', `Refining layout (pass ${pass})...`)
+
+    const refineAnalysis = await analyzeFrameForAdaptation({
+      runId,
+      sourceFrame: outputNode,
+      targetWidth: Math.max(1, Math.round(outputNode.width)),
+      targetHeight: Math.max(1, Math.round(outputNode.height)),
+      presetId: session.presetId,
+      includeScreenshot: true
+    })
+
+    if (refineAnalysis.screenshot === null) {
+      throw new Error('Refine screenshot export failed.')
+    }
+
+    const refinedPlan = await requestRefinedLayoutPlan({
+      analysis: refineAnalysis,
+      referenceScreenshot: session.analysis.screenshot,
+      referenceFrameId: session.sourceFrameId
+    })
+
+    postAdaptationState(runId, pass, 'APPLYING', `Applying refined layout (pass ${pass})...`)
+
+    const refinedApplyResult = await applyAdaptationPlanToFrame({
+      targetFrame: outputNode,
+      analysis: refineAnalysis,
+      plan: refinedPlan
+    })
+
+    session.refineCount += 1
+    session.busy = false
+    adaptationSessions.set(runId, session)
+
+    figma.currentPage.selection = [outputNode]
+    figma.viewport.scrollAndZoomIntoView([outputNode])
+
+    const screenshot = await exportFrameScreenshot(outputNode)
+
+    const resultMessage: MainToUiMessage = {
+      type: 'APPLY_RESULT',
+      payload: {
+        runId,
+        pass,
+        createdFrameId: outputNode.id,
+        screenshot,
+        metrics: refinedApplyResult.metrics,
+        warnings: refinedApplyResult.warnings
+      }
+    }
+    figma.ui.postMessage(resultMessage)
+
+    postAdaptationState(runId, pass, 'COMPLETED', 'Refinement applied. Click Refine again or start new resize.')
+    figma.notify(`Refinement pass ${session.refineCount} applied.`)
+  } catch (error) {
+    console.error('[adaptation:refine]', error)
+    session.busy = false
+    adaptationSessions.set(runId, session)
+    postAdaptationError(runId, pass, `Refinement failed. ${toMessage(error)}`)
+    figma.notify('Refinement failed. Previous result kept.')
   }
+}
 
-  figma.currentPage.selection = [selectedNode]
-  figma.viewport.scrollAndZoomIntoView([selectedNode])
+function handleResetSession(payload: ResetSessionPayload): void {
+  const { runId } = payload
+  const session = adaptationSessions.get(runId)
+  if (typeof session === 'undefined') return
 
-  postAdaptationState(runId, pass, maxPasses, 'FINALIZING', 'Finalizing output...')
-  postAdaptationState(runId, pass, maxPasses, 'COMPLETED', 'Adaptation completed.')
+  if (session.busy) {
+    figma.notify('Cannot reset while a pass is running.')
+    return
+  }
 
   adaptationSessions.delete(runId)
+  postSelectionState()
+  figma.notify('Session cleared. Select a frame to start again.')
 }
 
 function getSourceFrameFromSession(session: AdaptationSession): FrameNode | null {
@@ -390,7 +462,6 @@ function getSourceFrameFromSession(session: AdaptationSession): FrameNode | null
 function postAdaptationState(
   runId: string,
   pass: number,
-  maxPasses: number,
   stage: 'IDLE' | 'ANALYZING' | 'PLANNING' | 'APPLYING' | 'FINALIZING' | 'COMPLETED' | 'FAILED',
   message: string
 ): void {
@@ -399,7 +470,6 @@ function postAdaptationState(
     session.lastState = {
       runId,
       pass,
-      maxPasses,
       stage,
       message
     }
@@ -411,7 +481,6 @@ function postAdaptationState(
     payload: {
       runId,
       pass,
-      maxPasses,
       stage,
       message
     }
@@ -422,7 +491,6 @@ function postAdaptationState(
 function postAdaptationError(
   runId: string,
   pass: number,
-  maxPasses: number,
   message: string
 ): void {
   const errorMessage: MainToUiMessage = {
@@ -433,7 +501,7 @@ function postAdaptationError(
     }
   }
   figma.ui.postMessage(errorMessage)
-  postAdaptationState(runId, pass, maxPasses, 'FAILED', message)
+  postAdaptationState(runId, pass, 'FAILED', message)
 }
 
 function computeTargetSize(
